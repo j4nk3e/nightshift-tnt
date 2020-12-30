@@ -1,2 +1,4 @@
 .rocks
 .vscode
+*.xlog
+*.snap
