@@ -1,5 +1,11 @@
 return {
-    database = 'host=/var/run/postgresql/ user=checkup dbname=checkup sslmode=disable',
+    database = {
+        host = 'localhost',
+        port = 5432,
+        dbq = 'nightshift',
+        user = 'nightshift',
+        password = 'password'
+    },
     api = {port = 8080},
     channels = {
         slack = os.getenv('SLACK_WEBHOOK')

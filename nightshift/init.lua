@@ -11,6 +11,7 @@ function ns.init()
         box.schema.space.create('nightshift', {
             format = {
                 {name = 'id', type = 'unsigned'},
+                {name = 'environment', type = 'string'},
                 {name = 'success', type = 'boolean'},
                 {name = 'duration', type = 'double'},
                 {name = 'time', type = 'double'}
@@ -23,11 +24,32 @@ function ns.init()
     end)
 end
 
+function ns.db_init(conn)
+    local table = [[
+    CREATE TABLE IF NOT EXISTS checks (
+        id             BIGSERIAL PRIMARY KEY,
+        created_at     TIMESTAMP NOT NULL DEFAULT now(),
+        environment    TEXT      NOT NULL,
+        duration       INT,
+        success        BOOLEAN,
+        status         TEXT
+    );
+    CREATE INDEX IF NOT EXISTS checks__environment__index
+        ON checks (environment, created_at ASC);
+    CREATE INDEX IF NOT EXISTS checks__success__index
+        ON checks (success);
+    ]]
+    conn:begin()
+    conn:execute(table)
+    conn:commit()
+end
+
 function ns.handler(self)
     local data = box.space.nightshift.index.primary:max()
     return self:render{
         json = {
             success = data.success,
+            environment = data.environment,
             duration_us = data.duration,
             time_us = data.time
         }
@@ -70,7 +92,7 @@ function Monitor:alert(ok, duration, raw)
     end
 end
 
-function Monitor:loop()
+function Monitor:loop(conn)
     self.alerting = false
     while true do
         local ok, duration, timestamp, raw = self:check()
@@ -88,7 +110,15 @@ function Monitor:loop()
             self:alert(ok, duration, raw)
         end
         self.alerting = not ok
-        box.space.nightshift:auto_increment{ok, duration, timestamp}
+        box.space.nightshift:auto_increment{self.name, ok, duration, timestamp}
+        conn:begin()
+        conn:execute([[
+            INSERT INTO checks
+                (created_at, environment, duration, success, status)
+            VALUES
+                (to_timestamp($1), $2, $3, $4, $5)]], timestamp / 1000,
+                     self.name, duration, ok, raw)
+        conn:commit()
         fiber.sleep(self.interval)
     end
 end
@@ -98,6 +128,21 @@ function ns.start(config)
     local c = config()
     local server = require('http.server').new(c.api.host, c.api.port)
     local router = require('http.router').new({charset = "utf8"})
+    local pool
+    local db = c.database
+    if db then
+        log.info('starting db')
+        local pg = require('pg')
+        log.info('creating db pool')
+        db.size = tablex.size(c.monitors) + 1
+        pool = pg.pool_create(db)
+        log.info('get db connection')
+        local conn = pool:get()
+        log.info('initializing db scheme')
+        ns.db_init(conn)
+        log.info('db init finished')
+        pool:put(conn)
+    end
     server:set_router(router)
     router:route({path = '/'}, ns.handler)
     server:start()
@@ -109,7 +154,9 @@ function ns.start(config)
                               monitor.alert))
         fiber.create(function()
             log.info('Watching ' .. name .. ' at ' .. m.host)
-            m:loop()
+            local conn = pool:get()
+            m:loop(conn)
+            pool:put(conn)
         end)
     end
 end
